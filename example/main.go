@@ -5,5 +5,7 @@ import (
 )
 
 func main() {
-	opcua.UAClientStartup()
+	cli, _ := opcua.NewClient()
+	cli.Close()
+
 }
