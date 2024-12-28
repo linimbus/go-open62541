@@ -1,0 +1,19 @@
+{
+    // "go.useLanguageServer": true,
+    "go.vetFlags": [
+        "-unsafeptr=false"
+    ],
+    "gopls": {
+        "analyses": {
+            "unsafeptr": false
+        }
+    },
+    "files.associations": {
+        "*.ndjson": "jsonl",
+        "*.dbclient-js": "javascript",
+        "*.c___": "cpp",
+        "open62541.h": "c",
+        "open62541_cgo.h": "c"
+    },
+    "editor.formatOnSave": true
+}
