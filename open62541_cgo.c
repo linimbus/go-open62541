@@ -126,28 +126,28 @@ UA_DateTime UA_VariantValueDateTime(NodeValue *nodeValue, int index) {
   return valueData[index];
 }
 
-NodeTree *UA_NodeTree_init(NodeTree *parent, uint32_t level, uint32_t index,
+NodeTree *ua_NodeTree_init(NodeTree *parent, uint32_t level, uint32_t index,
                            void *nodeID, size_t length) {
   NodeTree *node = (NodeTree *)malloc(sizeof(NodeTree));
   if (node == NULL) {
     return NULL;
   }
-  node->nodeID = (char *)malloc(length + 1);
-  if (node->nodeID == NULL) {
-    free(node);
-    return NULL;
-  }
+  memset(node, 0, sizeof(NodeTree));
 
-  memset(node->nodeID, '\0', length + 1);
-  memcpy(node->nodeID, nodeID, length);
+  if (length) {
+    node->nodeID = (char *)malloc(length + 1);
+    if (node->nodeID == NULL) {
+      free(node);
+      return NULL;
+    }
+    memset(node->nodeID, '\0', length + 1);
+    memcpy(node->nodeID, nodeID, length);
+  }
 
   node->level = level;
   node->index = index;
-
   node->parent = parent;
-  node->next = NULL;
-  node->tail = NULL;
-  node->head = NULL;
+  node->nodeLength = length;
 
   if (parent != NULL) {
     if (parent->head == NULL) {
@@ -161,28 +161,36 @@ NodeTree *UA_NodeTree_init(NodeTree *parent, uint32_t level, uint32_t index,
   return node;
 }
 
-void UA_NodeTree_clear(NodeTree *nodeTree) {
-  if (nodeTree->head) {
-    for (NodeTree *current = nodeTree->head;;) {
-      NodeTree *next = current->next;
-      UA_NodeTree_clear(current);
-      if (next == NULL) {
-        break;
-      }
-      current = next;
-    }
+NodeTree *UA_NodeTree_root_init() {
+  NodeTree *node = (NodeTree *)malloc(sizeof(NodeTree));
+  if (node == NULL) {
+    return NULL;
   }
-
-  free(nodeTree->nodeID);
-  free(nodeTree);
+  memset(node, 0, sizeof(NodeTree));
+  return node;
 }
 
-NodeTree *UA_NodeTree_next(NodeTree *nodeTree) { return nodeTree->next; }
+void UA_NodeTree_clear(NodeTree *node) {
+  NodeTree *cur = node->head;
+  while (cur) {
+    NodeTree *next = cur->next;
+    UA_NodeTree_clear(cur);
+    cur = next;
+  }
+  if (node->nodeID) {
+    memset(node->nodeID, 0, strlen(node->nodeID));
+    free(node->nodeID);
+  }
+  memset(node, 0, sizeof(NodeTree));
+  free(node);
+}
 
-NodeTree *UA_NodeTree_head(NodeTree *nodeTree) { return nodeTree->head; }
+NodeTree *UA_NodeTree_next(NodeTree *node) { return node->next; }
 
-void UA_BrowseNodeTreeLevel(UA_Client *client, UA_NodeId nodeId,
-                            NodeTree *parent, uint32_t level) {
+NodeTree *UA_NodeTree_head(NodeTree *node) { return node->head; }
+
+UA_StatusCode UA_Browse_nodeTreeLevel(UA_Client *client, UA_NodeId nodeId,
+                                      NodeTree *parent, uint32_t level) {
   UA_BrowseRequest bReq;
   UA_BrowseRequest_init(&bReq);
   bReq.requestedMaxReferencesPerNode = 0;
@@ -193,14 +201,13 @@ void UA_BrowseNodeTreeLevel(UA_Client *client, UA_NodeId nodeId,
   bReq.nodesToBrowse[0].resultMask = UA_BROWSERESULTMASK_ALL;
 
   UA_BrowseResponse bResp = UA_Client_Service_browse(client, bReq);
-
   if (bResp.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
-    // printf debug log
+    UA_BrowseResponse_clear(&bResp);
+    return bResp.responseHeader.serviceResult;
   }
 
   for (int i = 0; i < bResp.resultsSize; i++) {
     for (int j = 0; j < bResp.results[i].referencesSize; j++) {
-
       NodeTree *node = NULL;
 
       UA_ReferenceDescription *ref = &(bResp.results[i].references[j]);
@@ -209,30 +216,39 @@ void UA_BrowseNodeTreeLevel(UA_Client *client, UA_NodeId nodeId,
            ref->nodeClass == UA_NODECLASS_METHOD)) {
         if (ref->nodeId.nodeId.identifierType == UA_NODEIDTYPE_NUMERIC) {
 
-          node = UA_NodeTree_init(
+          node = ua_NodeTree_init(
               parent, level, ref->nodeId.nodeId.namespaceIndex,
               ref->browseName.name.data, ref->browseName.name.length);
-
-          if (node != NULL) {
-            UA_BrowseNodeTreeLevel(
-                client,
-                UA_NODEID_NUMERIC(ref->nodeId.nodeId.namespaceIndex,
-                                  ref->nodeId.nodeId.identifier.numeric),
-                node, level + 1);
+          if (node == NULL) {
+            return UA_STATUSCODE_BADOUTOFMEMORY;
           }
+
+          UA_StatusCode retval = UA_Browse_nodeTreeLevel(
+              client,
+              UA_NODEID_NUMERIC(ref->nodeId.nodeId.namespaceIndex,
+                                ref->nodeId.nodeId.identifier.numeric),
+              node, level + 1);
+
+          if (retval != UA_STATUSCODE_GOOD) {
+            return retval;
+          }
+
         } else if (ref->nodeId.nodeId.identifierType == UA_NODEIDTYPE_STRING) {
 
           node =
-              UA_NodeTree_init(parent, level, ref->nodeId.nodeId.namespaceIndex,
+              ua_NodeTree_init(parent, level, ref->nodeId.nodeId.namespaceIndex,
                                ref->nodeId.nodeId.identifier.string.data,
                                ref->nodeId.nodeId.identifier.string.length);
+          if (node == NULL) {
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+          }
 
-          if (node != NULL) {
-            UA_BrowseNodeTreeLevel(
-                client,
-                UA_NODEID_STRING(ref->nodeId.nodeId.namespaceIndex,
-                                 node->nodeID),
-                node, level + 1);
+          UA_StatusCode retval = UA_Browse_nodeTreeLevel(
+              client,
+              UA_NODEID_STRING(ref->nodeId.nodeId.namespaceIndex, node->nodeID),
+              node, level + 1);
+          if (retval != UA_STATUSCODE_GOOD) {
+            return retval;
           }
         }
       }
@@ -240,15 +256,50 @@ void UA_BrowseNodeTreeLevel(UA_Client *client, UA_NodeId nodeId,
   }
 
   UA_BrowseResponse_clear(&bResp);
+
+  return UA_STATUSCODE_GOOD;
 }
 
-NodeTree *UA_BrowseNodeTree(UA_Client *client) {
-  NodeTree *root = UA_NodeTree_init(NULL, 0, 0, (void *)"", 0);
+UA_StatusCode UA_Browse_nodeTree(UA_Client *client, NodeTree *root) {
+  return UA_Browse_nodeTreeLevel(
+      client, UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER), root, 1);
+}
 
-  if (root != NULL) {
-    UA_BrowseNodeTreeLevel(client, UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
-                           root, 1);
+UA_ReadValueId *UA_ReadValueID_alloc(int number) {
+  UA_ReadValueId *readValueId =
+      (UA_ReadValueId *)UA_malloc(sizeof(UA_ReadValueId) * number);
+  if (readValueId == NULL) {
+    return NULL;
   }
+  for (size_t i = 0; i < number; i++) {
+    UA_ReadValueId_init(&readValueId[i]);
+  }
+  return readValueId;
+}
 
-  return root;
+void UA_ReadValueID_free(UA_ReadValueId *readValueId) { UA_free(readValueId); }
+
+void UA_ReadValueID_string(UA_ReadValueId *readValueId, int index,
+                           UA_UInt16 nsIndex, char *chars,
+                           UA_UInt32 attributeId) {
+  readValueId[index].nodeId = UA_NODEID_STRING(nsIndex, chars);
+  readValueId[index].attributeId = attributeId;
+}
+
+UA_Variant *UA_ReadResponse_variant(UA_ReadResponse *response, int index) {
+  return &response->results[index].value;
+}
+
+void UA_Logger_init(UA_Logger *logger, void *context, void *log, void *clear) {
+  logger->log = log;
+  logger->context = context;
+  logger->clear = clear;
+}
+
+void UA_LoggerWrapper(void *callback, UA_LogLevel level,
+                      UA_LogCategory category, const char *format,
+                      va_list args) {
+  char buffer[1024] = {0};
+  vsnprintf(buffer, sizeof(buffer) - 1, format, args);
+  ((UA_Logger_Wrapper_t)callback)(level, category, buffer);
 }
